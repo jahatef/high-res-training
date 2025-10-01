@@ -65,7 +65,7 @@ def imagenet_train_pipeline(data_dir, crop=224, shard_id=0, num_shards=1, dali_c
         crop=(crop, crop),
         mean=[0.485*255, 0.456*255, 0.406*255],
         std=[0.229*255, 0.224*255, 0.225*255],
-        output_dtype=types.FLOAT,
+        dtype=types.FLOAT,
         output_layout="CHW"
     )
     return images, labels
@@ -93,7 +93,7 @@ def imagenet_val_pipeline(data_dir, crop=224, shard_id=0, num_shards=1, dali_cpu
         crop=(crop, crop),
         mean=[0.485*255, 0.456*255, 0.406*255],
         std=[0.229*255, 0.224*255, 0.225*255],
-        output_dtype=types.FLOAT,
+        dtype=types.FLOAT,
         output_layout="CHW"
     )
     return images, labels
@@ -108,7 +108,7 @@ def get_dali_loader(data_dir, batch_size, num_threads, device_id, crop, is_train
             crop=crop,
             shard_id=rank,
             num_shards=world_size,
-            prefetch_queue_depth=1
+            prefetch_queue_depth=2
         )
     else:
         pipe = imagenet_val_pipeline(
@@ -118,7 +118,8 @@ def get_dali_loader(data_dir, batch_size, num_threads, device_id, crop, is_train
             data_dir=data_dir,
             crop=crop,
             shard_id=rank,
-            num_shards=world_size
+            num_shards=world_size,
+            prefetch_queue_depth=2
         )
 
     pipe.build()
@@ -364,7 +365,7 @@ import time
 
 def train_one_epoch(
     model, loader, optimizer, scaler, criterion, device, epoch, rank,
-    scheduler, microbatch_size, use_amp=False, max_grad_norm=1.0, measure_timing=True, image_size=384
+    scheduler, microbatch_size, use_amp=False, max_grad_norm=1.0, measure_timing=False, image_size=384
 ):
     model.train()
     running_loss = 0.0
@@ -413,9 +414,6 @@ def train_one_epoch(
             t1 = time.time()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        grad_norm_before = compute_gradient_norm(model)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        grad_norm_after = compute_gradient_norm(model)
         if measure_timing:
             torch.cuda.synchronize()
             timings["time_backward"] = time.time() - t1
@@ -464,10 +462,12 @@ def train_one_epoch(
             print("ViT-L/16 FLOPs:", human_readable(flops), "image_size: ", image_size)
             flops_per_sec_per_gpu = flops / elapsed_time_per_iter
             print(f"ViT-L/16 FLOPs/sec/gpu: {human_readable(flops_per_sec_per_gpu)}, iteration time: {elapsed_time_per_iter} seconds")
-            grad_norm = compute_gradient_norm(model)
+            grad_norm_before = compute_gradient_norm(model)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norm_after = compute_gradient_norm(model)
             param_norm = compute_parameter_norm(model)
             opt_state_norm = compute_optimizer_state_norm(optimizer)
-            noise_scale = compute_gradient_noise_scale(loss, grad_norm)
+            noise_scale = compute_gradient_noise_scale(loss, grad_norm_before)
 
             log_dict = {
                 "epoch": epoch,
@@ -515,7 +515,7 @@ def train_one_epoch_profile(
     # -------------------------
     prof = profiler.profile(
         activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
-        schedule=profiler.schedule(wait=0, warmup=0, active=5, repeat=1),  # only first 5 iters
+        schedule=profiler.schedule(wait=0, warmup=1, active=5, repeat=1),  # only first 5 iters
         on_trace_ready=profiler.tensorboard_trace_handler("./profiler_logs"),
         record_shapes=True,
         with_stack=True,
@@ -761,7 +761,7 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
     if scaler and checkpoint.get("scaler"):
         scaler.load_state_dict(checkpoint["scaler"])
     #scheduler.load_state_dict(checkpoint["scheduler"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    #optimizer.load_state_dict(checkpoint["optimizer"])
     #start_epoch = checkpoint["epoch"] + 1
     start_epoch=0
 
