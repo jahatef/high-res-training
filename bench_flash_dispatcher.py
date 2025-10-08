@@ -12,7 +12,7 @@ def benchmark_torch_function_in_microseconds(f, *args, **kwargs):
     return t0.blocked_autorange().mean * 1e6
 
 # Lets define the hyper-parameters of our input
-batch_size = 18
+batch_size = 8
 max_sequence_len = (4096//16)**2+1 #36865
 num_heads = 16
 embed_dimension = 64
@@ -64,4 +64,7 @@ def flops(batch, seqlen, headdim, nheads, causal, mode="fwd"):
     return f if mode == "fwd" else (2.5 * f if mode == "bwd" else 3.5 * f)
 
 
-print(flops(batch_size,max_sequence_len,embed_dimension,num_heads,False))
+print(flops(batch_size,max_sequence_len,embed_dimension,num_heads,False,mode="bwd"))
+
+
+print(batch_size * max_sequence_len * num_heads * embed_dimension * 4 /10**12)

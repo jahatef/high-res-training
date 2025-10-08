@@ -71,7 +71,7 @@ repeats = 30
 device = 'cuda'
 dtype = torch.float16
 
-bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384), (8, (4096//16)**2)]
+bs_seqlen_vals = [(8, (4096//16)**2), (32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384), (8, (4096//16)**2)]
 causal_vals = [False]
 headdim_vals = [64, 128]
 dim = 1024
@@ -88,6 +88,19 @@ time_f_b = {}
 speed_f = {}
 speed_b = {}
 speed_f_b = {}
+
+import torch.profiler as profiler
+
+prof = profiler.profile(
+        activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
+        schedule=profiler.schedule(wait=0, warmup=0, active=5, repeat=1),  # only first 5 iters
+        on_trace_ready=profiler.tensorboard_trace_handler("./profiler_logs-flash"),
+        record_shapes=True,
+        with_stack=True,
+        profile_memory=True,
+        with_flops=True,
+    )
+prof.start()
 
 for causal in causal_vals:
     for headdim in headdim_vals:
@@ -190,6 +203,9 @@ for causal in causal_vals:
                     f"bwd: {speed_b[config, method]:.2f} TFLOPs/s, "
                     f"fwd + bwd: {speed_f_b[config, method]:.2f} TFLOPs/s"
                 )
+                prof.step()
+                
+            prof.stop()
 
 # with open('flash2_attn_time.plk', 'wb') as fp:
 #     pickle.dump((speed_f, speed_b, speed_f_b), fp, protocol=pickle.HIGHEST_PROTOCOL)

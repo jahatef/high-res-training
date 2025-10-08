@@ -165,9 +165,13 @@ def vit_mac_flops(
     # ---- Classifier head (tiny; included for completeness) ----
     macs_head = D * num_classes
 
+    est_flops = 2*N*patch*patch*3*D + depth*(2*N*3*D*D + 2*N*N*D + 3*heads*N*N + 2*N*N*D + 2*N*D*D + 4*N*D*4*D) + 2*D*N
+
     total_macs = macs_patch_embed + macs_transformer + macs_head
     if count_flops:
-        return 2 * total_macs  # FLOPs
+        old = 2 * total_macs  # FLOPs
+        print(f"old: {old}, new: {est_flops}")
+        return est_flops 
     return total_macs         # MACs
 
 
@@ -347,17 +351,17 @@ def create_dataloaders_ddp(data_dir, image_size, batch_size, num_workers, rank, 
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device_id = local_rank
-    num_threads = 8
-    train_loader = get_dali_loader(train_path, batch_size, num_threads, device_id, crop=image_size,
-                               is_train=True, world_size=world_size, rank=rank)
-    val_loader   = get_dali_loader(val_path, batch_size, num_threads, device_id, crop=image_size,
-                               is_train=False, world_size=world_size, rank=rank)
-    #train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
-    #                          num_workers=num_workers, collate_fn=timed_collate, pin_memory=True,prefetch_factor=4)
-    #val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
-    #                        num_workers=num_workers,collate_fn=timed_collate,  pin_memory=True)
+    #local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    #device_id = local_rank
+    #num_threads = 8
+    #train_loader = get_dali_loader(train_path, batch_size, num_threads, device_id, crop=image_size,
+    #                           is_train=True, world_size=world_size, rank=rank)
+    #val_loader   = get_dali_loader(val_path, batch_size, num_threads, device_id, crop=image_size,
+    #                           is_train=False, world_size=world_size, rank=rank)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
+                              num_workers=num_workers, collate_fn=timed_collate, pin_memory=True,prefetch_factor=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
+                            num_workers=num_workers,collate_fn=timed_collate,  pin_memory=True)
 
     return train_loader, val_loader, train_sampler
 
@@ -376,10 +380,11 @@ def train_one_epoch(
     if measure_timing:
             torch.cuda.synchronize()
             tdata = time.time()
-    for i, data in enumerate(loader):
-        images = data[0]["data"]    # Already on GPU (CHW, float32)
-        labels = data[0]["label"].squeeze().long().cuda(non_blocking=True)
-        timings = {}
+    for i, (images, labels) in enumerate(loader):
+        images, labels = images.to(device), labels.to(device)
+        #images = data[0]["data"]    # Already on GPU (CHW, float32)
+        #labels = data[0]["label"].squeeze().long().cuda(non_blocking=True)
+        #timings = {}
         '''print(images.is_pinned())
         torch.cuda.synchronize()
         images, labels = images.to(device), labels.to(device)
@@ -457,6 +462,8 @@ def train_one_epoch(
         if rank == 0 and i % 1 == 0:
             torch.cuda.synchronize()
             elapsed_time_per_iter = (time.time() - t)/1 if i > 0 else (time.time() - t)
+            flops_per_batch = vit_mac_flops(image_size, image_size)
+            print(f"flops_per_batch: {flops_per_batch}")
             flops = 3 * microbatch_size * vit_mac_flops(image_size, image_size)
 
             print("ViT-L/16 FLOPs:", human_readable(flops), "image_size: ", image_size)
@@ -524,9 +531,8 @@ def train_one_epoch_profile(
     )
     prof.start()
 
-    for i, data in enumerate(loader):
-        images = data[0]["data"]    # Already on GPU (CHW, float32)
-        labels = data[0]["label"].squeeze().long().cuda(non_blocking=True)
+    for i, (images, labels) in enumerate(loader):
+        images, labels = images.to(device), labels.to(device)
         timings = {}
         '''print(images.is_pinned())
         torch.cuda.synchronize()
@@ -668,9 +674,8 @@ def validate(model, loader, criterion, device):
     total = 0
 
     with torch.no_grad():
-        for i, data in enumerate(loader):
-            images = data[0]["data"]    # Already on GPU (CHW, float32)
-            labels = data[0]["label"].squeeze().long().cuda(non_blocking=True)
+        for i, (images, labels) in enumerate(loader):
+            images, labels = images.to(device), labels.to(device)
             outputs = model(images)
             loss = criterion(outputs, labels)
 
@@ -760,7 +765,7 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
     # Load optimizer, scheduler, scaler
     if scaler and checkpoint.get("scaler"):
         scaler.load_state_dict(checkpoint["scaler"])
-    #scheduler.load_state_dict(checkpoint["scheduler"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
     #optimizer.load_state_dict(checkpoint["optimizer"])
     #start_epoch = checkpoint["epoch"] + 1
     start_epoch=0
@@ -843,7 +848,7 @@ def main():
         num_classes=1000,#len(train_loader.dataset.classes),
         img_size=(image_size, image_size)
     )
-    model.set_grad_checkpointing()  # 🔧 Enable checkpointing in timm
+    #model.set_grad_checkpointing()  # 🔧 Enable checkpointing in timm
     model.to(device)
 
     # 🔧 Setup FSDP wrapping and mixed precision
@@ -878,11 +883,22 @@ def main():
     if rank == 0:
         num_params = sum(p.numel() for p in model.parameters()) * world_size
         print(f"Number of Parameters: {num_params} \n")
-    for epoch in range(start_epoch, args.epochs + 1):
+    epoch = 0
+    train_loss,train_acc = 0,0
+    val_loss, val_acc = validate(model, val_loader, criterion, device)
+    if rank == 0:
+            print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
 
+            if args.use_wandb:
+                wandb.log({
+                    "epoch": epoch,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc
+                })
+    for epoch in range(start_epoch, args.epochs + 1):
         train_sampler.set_epoch(epoch)
         train_loss,train_acc = 0,0
-        train_loss, train_acc = train_one_epoch_profile(
+        train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, scaler, criterion, device, epoch, rank, scheduler, args.batch_size,
             use_amp=args.mixed_precision, max_grad_norm=5.0, measure_timing = False, image_size=image_size  # ← Clip to 1.0
         )
