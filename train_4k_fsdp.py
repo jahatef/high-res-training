@@ -30,6 +30,7 @@ from torch.profiler import profile, ProfilerActivity, record_function
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
 import os
+from pickle import dump
 
 import os
 from PIL import Image
@@ -344,7 +345,8 @@ def create_dataloaders_ddp(data_dir, image_size, batch_size, num_workers, rank, 
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3),
     ]))
-
+    print(f"train_data_path: {train_path}")
+    print(f"val_data_path: {val_path}")
     train_dataset = ImageFolder(train_path, transform=transform)
     val_dataset = FixedIndexImageFolder(val_path, transform=transform)
 
@@ -505,6 +507,14 @@ def train_one_epoch(
 
 import torch.profiler as profiler
 
+def save_snapshot(prof_path):
+    snapshot = torch.cuda.memory._snapshot()
+    snapshot_path = os.path.join(prof_path)
+    if not os.path.exists(snapshot_path):
+        os.makedirs(snapshot_path)
+    with open(os.path.join(snapshot_path, "mem_snapshot_flash.pickle"), "wb") as f:
+        dump(snapshot, f)
+
 def train_one_epoch_profile(
     model, loader, optimizer, scaler, criterion, device, epoch, rank,
     scheduler, microbatch_size, use_amp=False, max_grad_norm=1.0, measure_timing=True, image_size=384
@@ -520,6 +530,12 @@ def train_one_epoch_profile(
     # -------------------------
     # Profiler setup
     # -------------------------
+    torch.cuda.memory._record_memory_history(
+            True,
+            # keep a maximum 100,000 alloc/free events from before the snapshot
+            trace_alloc_max_entries=10000000,
+            trace_alloc_record_context=True,
+        )
     prof = profiler.profile(
         activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
         schedule=profiler.schedule(wait=0, warmup=1, active=5, repeat=1),  # only first 5 iters
@@ -529,9 +545,12 @@ def train_one_epoch_profile(
         profile_memory=True,
         with_flops=True,
     )
+    prof_iters = 5
     prof.start()
+    torch.cuda.cudart().cudaProfilerStart()
 
     for i, (images, labels) in enumerate(loader):
+        torch.cuda.nvtx.range_push(f"Get batch")
         images, labels = images.to(device), labels.to(device)
         timings = {}
         '''print(images.is_pinned())
@@ -550,6 +569,8 @@ def train_one_epoch_profile(
         # -------------------------
         # Forward
         # -------------------------
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push(f"Forward pass")
         if measure_timing:
             torch.cuda.synchronize()
             t0 = time.time()
@@ -559,10 +580,12 @@ def train_one_epoch_profile(
         if measure_timing:
             torch.cuda.synchronize()
             timings["time_forward"] = time.time() - t0
+        torch.cuda.nvtx.range_pop()
 
         # -------------------------
         # Backward
         # -------------------------
+        torch.cuda.nvtx.range_push(f"Backward pass")
         if measure_timing:
             torch.cuda.synchronize()
             t1 = time.time()
@@ -574,10 +597,11 @@ def train_one_epoch_profile(
         if measure_timing:
             torch.cuda.synchronize()
             timings["time_backward"] = time.time() - t1
-
+        torch.cuda.nvtx.range_pop()
         # -------------------------
         # Optimizer step
         # -------------------------
+        torch.cuda.nvtx.range_push(f"Optimizer step")
         if measure_timing:
             torch.cuda.synchronize()
             t2 = time.time()
@@ -587,6 +611,7 @@ def train_one_epoch_profile(
         if measure_timing:
             torch.cuda.synchronize()
             timings["time_optimizer"] = time.time() - t2
+        torch.cuda.nvtx.range_pop()
 
         # -------------------------
         # Scheduler step
@@ -651,9 +676,12 @@ def train_one_epoch_profile(
         # -------------------------
         # Profiler step
         # -------------------------
-        prof.step()
-        if i >= 5:  # stop profiling after 5 iterations
+        if i <= prof_iters:
+            prof.step()
+            save_snapshot("memory_prof")
+        if i == prof_iters:  # stop profiling after 5 iterations
             prof.stop()
+            torch.cuda.memory._record_memory_history(enabled=None)
             if rank == 0:
                 # Print a summary table of ops
                 print("\n==== PyTorch Profiler Summary (first 5 iterations) ====")
@@ -848,7 +876,7 @@ def main():
         num_classes=1000,#len(train_loader.dataset.classes),
         img_size=(image_size, image_size)
     )
-    #model.set_grad_checkpointing()  # 🔧 Enable checkpointing in timm
+    model.set_grad_checkpointing()  # 🔧 Enable checkpointing in timm
     model.to(device)
 
     # 🔧 Setup FSDP wrapping and mixed precision
