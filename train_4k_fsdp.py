@@ -40,7 +40,7 @@ import re
 import glob
 
 import torch.nn.functional as F
-
+'''
 from nvidia.dali import pipeline_def, fn, types
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
 
@@ -130,7 +130,7 @@ def get_dali_loader(data_dir, batch_size, num_threads, device_id, crop, is_train
         reader_name="Reader",
         auto_reset=True
     )
-
+'''
 
 def vit_mac_flops(
     H, W,
@@ -171,7 +171,7 @@ def vit_mac_flops(
     total_macs = macs_patch_embed + macs_transformer + macs_head
     if count_flops:
         old = 2 * total_macs  # FLOPs
-        print(f"old: {old}, new: {est_flops}")
+        #print(f"old: {old}, new: {est_flops}")
         return est_flops 
     return total_macs         # MACs
 
@@ -464,8 +464,8 @@ def train_one_epoch(
         if rank == 0 and i % 1 == 0:
             torch.cuda.synchronize()
             elapsed_time_per_iter = (time.time() - t)/1 if i > 0 else (time.time() - t)
-            flops_per_batch = vit_mac_flops(image_size, image_size)
-            print(f"flops_per_batch: {flops_per_batch}")
+            flops_per_batch = vit_mac_flops(image_size, image_size, num_classes=num_classes)
+            #print(f"flops_per_batch: {flops_per_batch}")
             flops = 3 * microbatch_size * vit_mac_flops(image_size, image_size)
 
             print("ViT-L/16 FLOPs:", human_readable(flops), "image_size: ", image_size)
@@ -930,7 +930,7 @@ def main():
         print(f"Number of Parameters: {num_params} \n")
     epoch = 0
     train_loss,train_acc = 0,0
-    val_loss, val_acc = validate(model, val_loader, criterion, device)
+    '''val_loss, val_acc = validate(model, val_loader, criterion, device)
     if rank == 0:
             print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
 
@@ -939,7 +939,7 @@ def main():
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "val_acc": val_acc
-                })
+                })'''
     for epoch in range(start_epoch, args.epochs + 1):
         train_sampler.set_epoch(epoch)
         train_loss,train_acc = 0,0
