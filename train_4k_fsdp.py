@@ -139,7 +139,7 @@ def vit_mac_flops(
     depth=24,          # ViT-L depth
     heads=16,          # ViT-L heads (not needed for FLOPs formula directly)
     include_cls_token=True,
-    num_classes=1000,
+    num_classes=6,
     count_flops=True   # True -> return FLOPs (2*MACs), False -> MACs
 ):
     """
@@ -348,7 +348,7 @@ def create_dataloaders_ddp(data_dir, image_size, batch_size, num_workers, rank, 
     print(f"train_data_path: {train_path}")
     print(f"val_data_path: {val_path}")
     train_dataset = ImageFolder(train_path, transform=transform)
-    val_dataset = FixedIndexImageFolder(val_path, transform=transform)
+    val_dataset = ImageFolder(val_path, transform=transform)
 
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -793,7 +793,7 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
     # Load optimizer, scheduler, scaler
     if scaler and checkpoint.get("scaler"):
         scaler.load_state_dict(checkpoint["scaler"])
-    scheduler.load_state_dict(checkpoint["scheduler"])
+    #scheduler.load_state_dict(checkpoint["scheduler"])
     #optimizer.load_state_dict(checkpoint["optimizer"])
     #start_epoch = checkpoint["epoch"] + 1
     start_epoch=0
@@ -866,14 +866,14 @@ def main():
         #    True, trace_alloc_max_entries=10000000, trace_alloc_record_context=True
         #)
 
-    image_size = 4096 #768 * 2 * 2 # Adjust as needed
+    image_size =  4096 #768 * 2 * 2 # Adjust as needed
     train_loader, val_loader, train_sampler = create_dataloaders_ddp(
         args.data_dir, image_size, args.batch_size, args.num_workers, rank, world_size)
 
     model = timm.create_model(
         args.model_name,
         pretrained=True,
-        num_classes=1000,#len(train_loader.dataset.classes),
+        num_classes=len(train_loader.dataset.classes),
         img_size=(image_size, image_size)
     )
     model.set_grad_checkpointing()  # 🔧 Enable checkpointing in timm
