@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -t 48:0:00
+#SBATCH -t 24:0:00
 #SBATCH -N 4
 #SBATCH -p gpu
 #SBATCH -A PZS0622
@@ -13,7 +13,7 @@ source setup.sh
 cd high-res-training
 
 OMP_NUM_THREADS=12 torchrun --nproc_per_node=4  train_4k_fsdp.py \
-  --data-dir /fs/ess/PAS2699/jahatef/soybeans/ \
+  --data-dir /fs/ess/PAS2699/jahatef/corn/ \
   --epochs 15 \
   --batch-size 3 \
   --mixed-precision \
@@ -21,7 +21,7 @@ OMP_NUM_THREADS=12 torchrun --nproc_per_node=4  train_4k_fsdp.py \
   --min-lr 0.00000001 \
   --cpt-power 2 \
   --num-workers 8 \
-  --output-dir ./checkpoints-soybeans-ablate/ \
+  --output-dir ./checkpoints-corn-from-pretrained-ablate/ \
   --use-wandb \
   --resume /users/PAS2312/jahatef/cardinal/high-res/high-res-training/checkpoints-stage3-ablate/vit_large_patch16_384_epoch4.pt
   #--resume /users/PAS2312/jahatef/ascend/vrwkv/high-res-training/checkpoints-stage3-ablate/vit_large_patch16_384_epoch1.pt
