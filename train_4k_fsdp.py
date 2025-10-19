@@ -777,6 +777,7 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
 
     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
         state_dict = checkpoint["model"]
+        model_state = model.state_dict()
 
         # Handle positional embedding mismatch
         if "pos_embed" in state_dict and "pos_embed" in model.state_dict():
@@ -787,8 +788,24 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
                     print(f"⚠️ Resizing pos_embed from {old_posemb.shape} to {new_posemb.shape}")
                 state_dict["pos_embed"] = resize_pos_embed(old_posemb, new_posemb)
 
+        # --- Handle classifier head mismatch ---
+        for key in list(state_dict.keys()):
+            if key in model_state and state_dict[key].shape != model_state[key].shape:
+                if rank == 0:
+                    print(f"⚠️ Skipping layer '{key}' due to shape mismatch "
+                          f"({state_dict[key].shape} vs {model_state[key].shape})")
+                del state_dict[key]  # skip incompatible layers
+
+        # --- Load the model (allow missing keys for reinit layers) ---
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if rank == 0:
+            if missing:
+                print(f"ℹ️ Missing keys reinitialized: {missing}")
+            if unexpected:
+                print(f"⚠️ Unexpected keys in checkpoint: {unexpected}")
+
         # Load into model
-        model.load_state_dict(state_dict, strict=False)
+        #model.load_state_dict(state_dict, strict=False)
 
     # Load optimizer, scheduler, scaler
     if scaler and checkpoint.get("scaler"):
