@@ -31,6 +31,7 @@ from torchvision.datasets import ImageFolder
 from torchvision import transforms
 import os
 from pickle import dump
+import numpy as np
 
 import os
 from PIL import Image
@@ -464,7 +465,7 @@ def train_one_epoch(
         if rank == 0 and i % 1 == 0:
             torch.cuda.synchronize()
             elapsed_time_per_iter = (time.time() - t)/1 if i > 0 else (time.time() - t)
-            flops_per_batch = vit_mac_flops(image_size, image_size, num_classes=num_classes)
+            flops_per_batch = vit_mac_flops(image_size, image_size)
             #print(f"flops_per_batch: {flops_per_batch}")
             flops = 3 * microbatch_size * vit_mac_flops(image_size, image_size)
 
@@ -695,26 +696,54 @@ def train_one_epoch_profile(
     return avg_loss, accuracy
 
 
-def validate(model, loader, criterion, device):
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+
+def validate(model, loader, criterion, device, num_classes=None):
     model.eval()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    all_labels = []
+    all_preds = []
 
     with torch.no_grad():
-        for i, (images, labels) in enumerate(loader):
+        for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
             outputs = model(images)
             loss = criterion(outputs, labels)
-
             running_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
 
-    accuracy = 100. * correct / total
+            _, predicted = outputs.max(1)
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+
     avg_loss = running_loss / len(loader)
-    return avg_loss, accuracy
+    all_labels = np.array(all_labels)
+    all_preds = np.array(all_preds)
+
+    # Basic accuracy
+    accuracy = 100.0 * (all_labels == all_preds).sum() / len(all_labels)
+
+    # Compute precision, recall, F1 (macro handles class imbalance gracefully)
+    precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+    # Optional confusion matrix
+    if num_classes is not None and num_classes <= 50:  # avoid large confusion matrices
+        cm = confusion_matrix(all_labels, all_preds, labels=range(num_classes))
+    else:
+        cm = None
+
+    metrics = {
+        "val_loss": avg_loss,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "confusion_matrix": cm
+    }
+
+    return metrics
+
 
 class CPTIterationScheduler(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer, warmup_iters, total_iters, power=2.0, min_lr=0.0, last_epoch=-1):
@@ -810,10 +839,10 @@ def load_checkpoint(path, model, optimizer, scaler, scheduler, device):
     # Load optimizer, scheduler, scaler
     if scaler and checkpoint.get("scaler"):
         scaler.load_state_dict(checkpoint["scaler"])
-    #scheduler.load_state_dict(checkpoint["scheduler"])
-    #optimizer.load_state_dict(checkpoint["optimizer"])
-    #start_epoch = checkpoint["epoch"] + 1
-    start_epoch=0
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    start_epoch = checkpoint["epoch"] + 1
+    #start_epoch=0
 
     if rank == 0:
         print(f"✅ Checkpoint loaded from {path}, resuming at epoch {start_epoch}.")
@@ -928,18 +957,29 @@ def main():
     if rank == 0:
         num_params = sum(p.numel() for p in model.parameters()) * world_size
         print(f"Number of Parameters: {num_params} \n")
-    epoch = 0
     train_loss,train_acc = 0,0
-    '''val_loss, val_acc = validate(model, val_loader, criterion, device)
+    metrics = validate(model, val_loader, criterion, device)
+    val_loss, val_acc = metrics['val_loss'], metrics['accuracy']
     if rank == 0:
-            print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
-
+            print(
+                f"[Epoch {start_epoch}] "
+                f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | "
+                f"Val Loss: {metrics['val_loss']:.4f}, "
+                f"Acc: {metrics['accuracy']:.2f}%, "
+                f"Prec: {metrics['precision']:.3f}, "
+                f"Rec: {metrics['recall']:.3f}, "
+                f"F1: {metrics['f1_score']:.3f}"
+            )
             if args.use_wandb:
                 wandb.log({
                     "epoch": epoch,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc
-                })'''
+                    "val_loss": metrics["val_loss"],
+                    "val_acc": metrics["accuracy"],
+                    "val_precision": metrics["precision"],
+                    "val_recall": metrics["recall"],
+                    "val_f1": metrics["f1_score"]
+                })
+    return 1
     for epoch in range(start_epoch, args.epochs + 1):
         train_sampler.set_epoch(epoch)
         train_loss,train_acc = 0,0
@@ -948,7 +988,7 @@ def main():
             use_amp=args.mixed_precision, max_grad_norm=5.0, measure_timing = False, image_size=image_size  # ← Clip to 1.0
         )
         val_loss, val_acc = validate(model, val_loader, criterion, device)
-
+        val_loss, val_acc = metrics['val_loss'], metrics['accuracy']
         if rank == 0:
             print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
 
